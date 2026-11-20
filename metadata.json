@@ -1,0 +1,8 @@
+{
+  "name": "SportsNetwork",
+  "description": "Live sports scores, fixtures, standings, and breaking headlines across Football, Cricket, NBA, and Formula 1.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

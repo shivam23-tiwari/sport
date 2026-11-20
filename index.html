@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SportsNetwork — Live Scores, Standings &amp; Breaking Sports News</title>
+    <meta
+      name="description"
+      content="Real-time live scores, fixtures, league standings, and breaking headlines across Football, Cricket, NBA, and Formula 1."
+    />
+    <meta property="og:title" content="SportsNetwork — Live Scores, Standings &amp; Breaking Sports News" />
+    <meta
+      property="og:description"
+      content="Real-time live scores, fixtures, league standings, and breaking headlines across Football, Cricket, NBA, and Formula 1."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,700;0,800;1,800&family=JetBrains+Mono:wght@500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('sn_theme');
+          if (saved === 'light') {
+            document.documentElement.classList.remove('dark');
+          } else {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-[#F6F7F9] text-slate-900 dark:bg-[#0A0D14] dark:text-slate-100 antialiased selection:bg-rose-600 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
