@@ -1,7 +1,6 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import * as path from 'path';
-import * as url from 'url';
 import 'dotenv/config';
 import {
   getAllNews,
@@ -14,14 +13,11 @@ import {
   type SportKey,
 } from './services/sports/index.js';
 
-const __filename = url.fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const VALID_SPORTS = new Set<SportKey>(['football', 'cricket', 'nba', 'f1']);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // CORS & JSON middleware
   app.use((req, res, next) => {
@@ -158,7 +154,7 @@ async function startServer() {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, '../dist');
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }

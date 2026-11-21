@@ -1,7 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import { CACHE_TTL, fetchJsonWithTimeout, fetchTextWithTimeout, getOrFetch } from './cache.js';
 import { queryGroundedJson } from './gemini.js';
-import type { Match, MatchDetail, MatchStatus, StandingsTable } from './types.js';
+import type { Match, MatchDetail, MatchStatus, StandingRow, StandingsTable } from './types.js';
 
 const xmlParser = new XMLParser({ ignoreAttributes: false, trimValues: true });
 
@@ -71,7 +71,6 @@ function splitTeamAndScore(rawSide: string): { name: string; score?: string; bat
   const trimmed = rawSide.trim();
   const batting = trimmed.includes('*');
   const withoutStar = trimmed.replace(/\*/g, '').trim();
-  // Match score segment starting with digits like 243/5 or 557/10 & 12/1 or 280/8 (48.2 ov)
   const scoreMatch = withoutStar.match(/^(.*?)\s+(\d[\d/&\s.*()a-zA-Z]*)$/);
   if (scoreMatch && /\d+\/\d+|\d+\s+all|\d+$/.test(scoreMatch[2].trim())) {
     return {
@@ -83,56 +82,105 @@ function splitTeamAndScore(rawSide: string): { name: string; score?: string; bat
   return { name: withoutStar, batting };
 }
 
+function mapCricketDataMatch(m: any, seriesTitle?: string): Match {
+  const t1 = m.teamInfo?.[0] || { name: m.teams?.[0] || 'Team 1' };
+  const t2 = m.teamInfo?.[1] || { name: m.teams?.[1] || 'Team 2' };
+  const s1 = m.score?.find((s: any) =>
+    s.inning?.toLowerCase().includes((t1.name || '').toLowerCase())
+  );
+  const s2 = m.score?.find((s: any) =>
+    s.inning?.toLowerCase().includes((t2.name || '').toLowerCase())
+  );
+
+  const formatScore = (s: any) => (s ? `${s.r}/${s.w} (${s.o} ov)` : undefined);
+  const status: MatchStatus =
+    m.matchStarted && !m.matchEnded ? 'LIVE' : m.matchEnded ? 'FT' : 'UPCOMING';
+
+  const isIntl = Boolean(getCricketLogo(t1.name || '') || getCricketLogo(t2.name || ''));
+
+  return {
+    id: `cricapi_${m.id}`,
+    sport: 'cricket',
+    league:
+      seriesTitle ||
+      (m.matchType ? `Cricket · ${String(m.matchType).toUpperCase()}` : 'Cricket'),
+    leagueCode: isIntl ? 'intl-cricket' : 'cricket',
+    status,
+    statusText:
+      m.status || (status === 'LIVE' ? 'LIVE' : status === 'FT' ? 'Result' : 'Scheduled'),
+    startTime: m.dateTimeGMT || m.date || new Date().toISOString(),
+    venue: m.venue,
+    home: {
+      name: t1.name,
+      shortName: t1.shortname || makeShortName(t1.name),
+      logo: t1.img || getCricketLogo(t1.name),
+      score: formatScore(s1),
+    },
+    away: {
+      name: t2.name,
+      shortName: t2.shortname || makeShortName(t2.name),
+      logo: t2.img || getCricketLogo(t2.name),
+      score: formatScore(s2),
+    },
+    detailNote: m.name || m.status,
+    sourceProvider: 'CricketData.org',
+  };
+}
+
 async function fetchFromCricketDataOrg(): Promise<Match[] | null> {
   const apiKey = process.env.CRICKETDATA_API_KEY?.trim();
   if (!apiKey) return null;
 
+  const seriesId = process.env.CRICKETDATA_SERIES_ID?.trim();
+
   try {
-    const data = await fetchJsonWithTimeout<any>(
-      `https://api.cricapi.com/v1/currentMatches?apikey=${encodeURIComponent(apiKey)}&offset=0`,
-      {},
-      7000
-    );
-    const list = Array.isArray(data?.data) ? data.data : [];
-    if (list.length === 0) return null;
+    const requests: Promise<any>[] = [
+      fetchJsonWithTimeout<any>(
+        `https://api.cricapi.com/v1/currentMatches?apikey=${encodeURIComponent(apiKey)}&offset=0`,
+        {},
+        7000
+      ).catch(() => null),
+      fetchJsonWithTimeout<any>(
+        `https://api.cricapi.com/v1/matches?apikey=${encodeURIComponent(apiKey)}&offset=0`,
+        {},
+        7000
+      ).catch(() => null),
+    ];
 
-    return list.slice(0, 20).map((m: any): Match => {
-      const t1 = m.teamInfo?.[0] || { name: m.teams?.[0] || 'Team 1' };
-      const t2 = m.teamInfo?.[1] || { name: m.teams?.[1] || 'Team 2' };
-      const s1 = m.score?.find((s: any) => s.inning?.toLowerCase().includes((t1.name || '').toLowerCase()));
-      const s2 = m.score?.find((s: any) => s.inning?.toLowerCase().includes((t2.name || '').toLowerCase()));
+    if (seriesId) {
+      requests.push(
+        fetchJsonWithTimeout<any>(
+          `https://api.cricapi.com/v1/series_info?apikey=${encodeURIComponent(apiKey)}&offset=0&id=${encodeURIComponent(seriesId)}`,
+          {},
+          7000
+        ).catch(() => null)
+      );
+    }
 
-      const formatScore = (s: any) =>
-        s ? `${s.r}/${s.w} (${s.o} ov)` : undefined;
+    const [currentRes, matchesRes, seriesRes] = await Promise.all(requests);
+    const merged: Match[] = [];
+    const seen = new Set<string>();
 
-      const status: MatchStatus =
-        m.matchStarted && !m.matchEnded ? 'LIVE' : m.matchEnded ? 'FT' : 'UPCOMING';
+    const addList = (items: any[], seriesName?: string) => {
+      if (!Array.isArray(items)) return;
+      for (const item of items) {
+        if (!item?.id || seen.has(item.id)) continue;
+        seen.add(item.id);
+        merged.push(mapCricketDataMatch(item, seriesName));
+      }
+    };
 
-      return {
-        id: `cricapi_${m.id}`,
-        sport: 'cricket',
-        league: m.matchType ? `Cricket · ${m.matchType.toUpperCase()}` : 'Cricket',
-        leagueCode: 'cricket',
-        status,
-        statusText: m.status || (status === 'LIVE' ? 'LIVE' : status === 'FT' ? 'Result' : 'Scheduled'),
-        startTime: m.dateTimeGMT || m.date || new Date().toISOString(),
-        venue: m.venue,
-        home: {
-          name: t1.name,
-          shortName: t1.shortname || makeShortName(t1.name),
-          logo: t1.img || getCricketLogo(t1.name),
-          score: formatScore(s1),
-        },
-        away: {
-          name: t2.name,
-          shortName: t2.shortname || makeShortName(t2.name),
-          logo: t2.img || getCricketLogo(t2.name),
-          score: formatScore(s2),
-        },
-        detailNote: m.status,
-        sourceProvider: 'CricketData.org',
-      };
-    });
+    if (seriesRes?.status === 'success' && seriesRes?.data?.matchList) {
+      addList(seriesRes.data.matchList, seriesRes.data.info?.name);
+    }
+    if (currentRes?.status === 'success') {
+      addList(currentRes.data);
+    }
+    if (matchesRes?.status === 'success') {
+      addList(matchesRes.data);
+    }
+
+    return merged.length > 0 ? merged.slice(0, 30) : null;
   } catch (err) {
     console.warn('[Cricket] CricketData.org failed:', (err as Error).message);
     return null;
@@ -209,7 +257,6 @@ async function fetchCricinfoLiveRss(): Promise<Match[]> {
         const idMatch = link.match(/match\/(\d+)\.html/);
         const matchId = idMatch ? `ci_${idMatch[1]}` : `ci_rss_${idx}`;
 
-        // '*' in Cricinfo RSS strictly marks an active/live batting innings
         const hasLiveInnings = left.batting || right.batting;
         const hasAnyScore = Boolean(left.score || right.score);
         const status: MatchStatus = hasLiveInnings ? 'LIVE' : hasAnyScore ? 'FT' : 'UPCOMING';
@@ -261,7 +308,6 @@ export async function getCricketMatches(force = false): Promise<{ matches: Match
 
       const primary = cricApi || sportmonks || cricinfoRss;
 
-      // Sort international & live matches first so marquee tests/ODIs/T20Is lead cleanly
       const order: Record<MatchStatus, number> = { LIVE: 0, UPCOMING: 1, FT: 2 };
       return [...primary].sort((a, b) => {
         if (order[a.status] !== order[b.status]) return order[a.status] - order[b.status];
@@ -276,11 +322,55 @@ export async function getCricketMatches(force = false): Promise<{ matches: Match
 }
 
 export async function getCricketStandings(force = false): Promise<{ tables: StandingsTable[]; fetchedAt: string }> {
-  const result = await getOrFetch(
+  const result = await getOrFetch<StandingsTable[]>(
     'cricket:standings',
     CACHE_TTL.STANDINGS,
-    async () => {
-      // Try CricketData series or optional Gemini grounded ICC WTC / ODI / T20I rankings
+    async (): Promise<StandingsTable[]> => {
+      const apiKey = process.env.CRICKETDATA_API_KEY?.trim();
+      const seriesId = process.env.CRICKETDATA_SERIES_ID?.trim();
+
+      // 1. If CricketData API key & Series ID are set, try series_points first
+      if (apiKey && seriesId) {
+        try {
+          const pts = await fetchJsonWithTimeout<any>(
+            `https://api.cricapi.com/v1/series_points?apikey=${encodeURIComponent(apiKey)}&id=${encodeURIComponent(seriesId)}`,
+            {},
+            7000
+          );
+          if (pts?.status === 'success' && Array.isArray(pts.data) && pts.data.length > 0) {
+            const rows: StandingRow[] = pts.data.map((r: any, idx: number) => ({
+              rank: idx + 1,
+              team: r.teamname || r.shortname || 'Team',
+              teamShort: r.shortname || makeShortName(r.teamname || 'TM'),
+              logo: r.img || getCricketLogo(r.teamname || ''),
+              played: Number(r.matches || 0),
+              won: Number(r.wins || 0),
+              lost: Number(r.loss || 0),
+              goalDiff: String(r.nr ?? 0),
+              points: Number(r.wins || 0) * 2 + Number(r.ties || 0) + Number(r.nr || 0),
+            }));
+            return [
+              {
+                id: `cricket_series_${seriesId}`,
+                sport: 'cricket',
+                leagueCode: 'intl-cricket',
+                title: 'Series Points Table',
+                columns: [
+                  { key: 'played', label: 'P' },
+                  { key: 'won', label: 'W' },
+                  { key: 'lost', label: 'L' },
+                  { key: 'points', label: 'PTS' },
+                ],
+                rows,
+              },
+            ];
+          }
+        } catch {
+          // continue to grounded fallback
+        }
+      }
+
+      // 2. Optional Gemini grounded ICC WTC standings
       const grounded = await queryGroundedJson<{
         title: string;
         rows: { rank: number; team: string; played: number; won: number; lost: number; points: string }[];
@@ -326,43 +416,67 @@ export async function getCricketStandings(force = false): Promise<{ tables: Stan
 
 export async function getCricketMatchDetail(id: string): Promise<MatchDetail | null> {
   const { matches } = await getCricketMatches();
-  const match = matches.find((m) => m.id === id);
-  if (!match) return null;
+  let match = matches.find((m) => m.id === id);
 
-  // If CricketData.org key is set and id starts with cricapi_, fetch full scorecard
   const apiKey = process.env.CRICKETDATA_API_KEY?.trim();
-  if (apiKey && id.startsWith('cricapi_')) {
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  const rawId = id.startsWith('cricapi_') ? id.replace('cricapi_', '') : isUuid ? id : null;
+
+  if (apiKey && rawId) {
     try {
-      const rawId = id.replace('cricapi_', '');
-      const data = await fetchJsonWithTimeout<any>(
-        `https://api.cricapi.com/v1/match_scorecard?apikey=${encodeURIComponent(apiKey)}&id=${encodeURIComponent(rawId)}`,
-        {},
-        7000
-      );
-      const sc = data?.data;
-      if (sc?.scorecard && Array.isArray(sc.scorecard)) {
-        const lineups = sc.scorecard.map((inn: any) => ({
-          team: inn.inning || 'Innings',
-          players: (inn.batting || []).map((b: any) => ({
-            name: b.batsman?.name || 'Batter',
-            position: b['dismissal-text'] || 'not out',
-            stats: `${b.r ?? 0} (${b.b ?? 0}b · 4s:${b['4s'] ?? 0} 6s:${b['6s'] ?? 0})`,
-          })),
-        }));
+      const [scorecardRes, infoRes] = await Promise.all([
+        fetchJsonWithTimeout<any>(
+          `https://api.cricapi.com/v1/match_scorecard?apikey=${encodeURIComponent(apiKey)}&id=${encodeURIComponent(rawId)}`,
+          {},
+          7000
+        ).catch(() => null),
+        fetchJsonWithTimeout<any>(
+          `https://api.cricapi.com/v1/match_info?apikey=${encodeURIComponent(apiKey)}&id=${encodeURIComponent(rawId)}`,
+          {},
+          7000
+        ).catch(() => null),
+      ]);
+
+      const sc = scorecardRes?.data || infoRes?.data;
+      if (sc) {
+        if (!match) {
+          match = mapCricketDataMatch(sc);
+        }
+
+        const lineups = Array.isArray(sc.scorecard)
+          ? sc.scorecard.map((inn: any) => ({
+              team: inn.inning || 'Innings',
+              players: (inn.batting || []).map((b: any) => ({
+                name: b.batsman?.name || 'Batter',
+                position: b['dismissal-text'] || 'not out',
+                stats: `${b.r ?? 0} (${b.b ?? 0}b · 4s:${b['4s'] ?? 0} 6s:${b['6s'] ?? 0})`,
+              })),
+            }))
+          : [];
+
         return {
           match,
           summary: sc.status || match.detailNote,
           timeline: [],
           stats: [
-            { label: 'Format', homeValue: sc.matchType?.toUpperCase() || '-', awayValue: sc.venue || '-' },
+            {
+              label: 'Format',
+              homeValue: String(sc.matchType || '-').toUpperCase(),
+              awayValue: sc.venue || '-',
+            },
+            ...(sc.tossWinner
+              ? [{ label: 'Toss', homeValue: sc.tossWinner, awayValue: sc.tossChoice || '-' }]
+              : []),
           ],
           lineups,
         };
       }
     } catch {
-      // fall through to RSS summary
+      // fall through to cached match summary
     }
   }
+
+  if (!match) return null;
 
   return {
     match,
